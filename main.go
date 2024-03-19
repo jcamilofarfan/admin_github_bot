@@ -19,13 +19,23 @@ type MyRepository struct {
 	Topics       []string `json:"topics"`
 	Archived     *bool    `json:"archived"`
 	Disabled     *bool    `json:"disabled"`
+	Language     *string  `json:"language"`
 	Private      *bool    `json:"private"`
 	IsTemplate   *bool    `json:"is_template"`
+	IdLocal      *int64   `json:"id_local,omitempty"`
+}
+
+type MyRepositoryJson struct {
+	User         *github.User   `json:"user"`
+	Repositories []MyRepository `json:"repositories"`
 }
 
 var client *github.Client
 var owner string
-var update_json bool = false
+var data MyRepositoryJson = MyRepositoryJson{
+	User:         &github.User{},
+	Repositories: []MyRepository{},
+}
 
 func main() {
 	utils.Log(utils.Info, "Iniciando el bot")
@@ -38,18 +48,22 @@ func main() {
 	utils.Log(utils.Info, "Cliente de github creado")
 	client.UserAgent = "admin_github_bot"
 	utils.Log(utils.Info, "UserAgent creado")
+	set_data_github()
+	compare_repositories()
+}
+
+func set_data_github() {
+	utils.Log(utils.Info, "Inicio de obtención de usuario y repositorios")
 	user, reponse, err := client.Users.Get(context.Background(), "")
 	utils.Log(utils.Info, "Status: %v", reponse.Status)
 	if err != nil {
 		utils.Log(utils.Error, "Error al obtener el usuario %v", err)
 	}
 	owner = *user.Login
-	my_repositories_github := get_repositories()
-	compare_repositories(my_repositories_github)
-	if update_json {
-		my_repositories_github = get_repositories()
-		create_json(my_repositories_github)
-	}
+	utils.Log(utils.Info, "Usuario obtenido --> %v", owner)
+	data.User = user
+	data.Repositories = get_repositories()
+	utils.Log(utils.Info, "Finaliza obtención de usuario y repositorios")
 }
 
 func get_repositories() []MyRepository {
@@ -58,6 +72,8 @@ func get_repositories() []MyRepository {
 		ListOptions: github.ListOptions{
 			PerPage: 10,
 		},
+		Affiliation: "owner",
+		Sort:        "created",
 	}
 	var all_repos []*github.Repository
 	for {
@@ -79,8 +95,9 @@ func get_repositories() []MyRepository {
 }
 
 func create_json(list_repo []MyRepository) {
+	data.Repositories = list_repo
 	utils.Log(utils.Info, "Inicio de creación de json")
-	result_json, err_marshal := json.Marshal(list_repo)
+	result_json, err_marshal := json.Marshal(data)
 	if err_marshal != nil {
 		utils.Log(utils.Error, "Error al crear el json")
 	}
@@ -99,7 +116,7 @@ func create_json(list_repo []MyRepository) {
 func parse_to_my_repository(list_repo []*github.Repository) []MyRepository {
 	utils.Log(utils.Info, "Inicio de parseo de repositorio")
 	var my_repositories []MyRepository
-	for _, repo := range list_repo {
+	for i, repo := range list_repo {
 		my_repo_json, err_marshal := json.Marshal(repo)
 		if err_marshal != nil {
 			utils.Log(utils.Error, "Error al crear el json")
@@ -109,6 +126,7 @@ func parse_to_my_repository(list_repo []*github.Repository) []MyRepository {
 		if err_unmarshal != nil {
 			utils.Log(utils.Error, "Error al decodificar el json")
 		}
+		*my_repo.IdLocal = int64(i + 1)
 		my_repositories = append(my_repositories, my_repo)
 	}
 	utils.Log(utils.Info, "Fin de parseo de repositorio")
@@ -117,30 +135,25 @@ func parse_to_my_repository(list_repo []*github.Repository) []MyRepository {
 
 func NewMyRepository() MyRepository {
 	return MyRepository{
-		Id:           new(int64),  // 0
-		Name:         new(string), // ""
-		Description:  new(string), // ""
-		Homepage:     new(string), // ""
-		AllowForking: new(bool),   // false
-		Topics:       make([]string, 0),
-		Archived:     new(bool), // false
-		Disabled:     new(bool), // false
-		Private:      new(bool), // false
-		IsTemplate:   new(bool), // false
+		Id:           new(int64),        // 0
+		Name:         new(string),       // ""
+		Description:  new(string),       // ""
+		Homepage:     new(string),       // ""
+		AllowForking: new(bool),         // false
+		Topics:       make([]string, 0), // []
+		Archived:     new(bool),         // false
+		Disabled:     new(bool),         // false
+		Private:      new(bool),         // false
+		IsTemplate:   new(bool),         // false
+		IdLocal:      new(int64),        // 0
 	}
 }
 
-func compare_repositories(list_repo_github []MyRepository) {
+func compare_repositories() {
 	utils.Log(utils.Info, "Inicio de comparación de repositorios")
-	list_repo_local := get_json_file()
-	github_slice := make([]interface{}, len(list_repo_github))
-	local_slice := make([]interface{}, len(list_repo_local))
-	for i, v := range list_repo_github {
-		github_slice[i] = v
-	}
-	for i, v := range list_repo_local {
-		local_slice[i] = v
-	}
+	data_local := get_json_file()
+	github_slice := toInterfaceSlice(data.Repositories)
+	local_slice := toInterfaceSlice(data_local.Repositories)
 	for _, repo := range github_slice {
 		repo_local := find(local_slice, func(p interface{}) bool {
 			return *p.(MyRepository).Id == *repo.(MyRepository).Id
@@ -156,18 +169,16 @@ func compare_repositories(list_repo_github []MyRepository) {
 		})
 		if repo_github == nil {
 			utils.Log(utils.Info, "Se debe crear el repositorio: %s", *repo.(MyRepository).Name)
-			crear_repo(repo.(MyRepository))
+			crear_repo(repo.(MyRepository), *repo.(MyRepository).IdLocal)
 			continue
 		}
-		repo_github_struct := repo_github.(MyRepository)
-		compare_repository(repo.(MyRepository), repo_github_struct)
+		compare_repository(repo.(MyRepository), repo_github.(MyRepository))
 	}
-
 	utils.Log(utils.Info, "Fin de comparación de repositorios")
 }
 
 func eliminar_repo(repo MyRepository) {
-	utils.Log(utils.Info, "Inicio de eliminación de repositorio")
+	utils.Log(utils.Info, "Inicio de eliminación de repositorio --> %v", *repo.Name)
 	response, err := client.Repositories.Delete(context.Background(), owner, *repo.Name)
 	utils.Log(utils.Info, "Status: %v", response.Status)
 	if err != nil {
@@ -177,17 +188,21 @@ func eliminar_repo(repo MyRepository) {
 }
 
 func actualizar_repo(repo github.Repository, repo_name string) {
-	utils.Log(utils.Info, "Inicio de actualización de repositorio %v", repo_name)
-	_, response, err := client.Repositories.Edit(context.Background(), owner, repo_name, &repo)
+	utils.Log(utils.Info, "Inicio de actualización de repositorio %v con la data -> %v", repo_name, repo)
+	_, response, err := client.Repositories.ReplaceAllTopics(context.Background(), owner, repo_name, repo.Topics)
 	utils.Log(utils.Info, "Status: %v", response.Status)
 	if err != nil {
-		utils.Log(utils.Error, "Error al eliminar el repositorio %v", err)
+		utils.Log(utils.Error, "Error al actualizar los topics del repositorio %v", err)
+	}
+	_, response, err = client.Repositories.Edit(context.Background(), owner, repo_name, &repo)
+	utils.Log(utils.Info, "Status: %v", response.Status)
+	if err != nil {
+		utils.Log(utils.Error, "Error al actualizar el repositorio %v", err)
 	}
 	utils.Log(utils.Info, "Fin de actualización de repositorio")
 }
 
-func crear_repo(repo MyRepository) {
-	utils.Log(utils.Info, "Inicio de creación de repositorio")
+func crear_repo(repo MyRepository, id_local int64) {
 	repository := &github.Repository{
 		Name:         repo.Name,
 		Description:  repo.Description,
@@ -199,13 +214,27 @@ func crear_repo(repo MyRepository) {
 		Private:      repo.Private,
 		IsTemplate:   repo.IsTemplate,
 	}
-	_, response, err := client.Repositories.Create(context.Background(), "", repository)
+	utils.Log(utils.Info, "Inicio de creación de repositorio %v con la info --> %v", *repo.Name, repository)
+	new_repository, response, err := client.Repositories.Create(context.Background(), "", repository)
 	utils.Log(utils.Info, "Status: %v", response.Status)
 	if err != nil {
 		utils.Log(utils.Error, "Error al crear el repositorio %v", err)
 	}
-	update_json = true
+	for i, r := range data.Repositories {
+		if *r.IdLocal == id_local {
+			data.Repositories[i].Id = new_repository.ID
+		}
+	}
+	create_json(data.Repositories)
 	utils.Log(utils.Info, "Fin de creación de repositorio")
+}
+
+func toInterfaceSlice(slice []MyRepository) []interface{} {
+	new_slice := make([]interface{}, len(slice))
+	for i, v := range slice {
+		new_slice[i] = v
+	}
+	return new_slice
 }
 
 func find(array []interface{}, condicion func(interface{}) bool) interface{} {
@@ -217,27 +246,30 @@ func find(array []interface{}, condicion func(interface{}) bool) interface{} {
 	return nil
 }
 
-func get_json_file() []MyRepository {
+func get_json_file() MyRepositoryJson {
 	utils.Log(utils.Info, "Inicio de obtención de json")
-	response := []MyRepository{}
+	data_file := MyRepositoryJson{}
 	file, err_open_file := os.Open("jcamilofarfan.json")
 	if err_open_file != nil {
 		utils.Log(utils.Error, "Error al abrir el archivo")
 	}
 	defer file.Close()
 	decoder := json.NewDecoder(file)
-	err_decode := decoder.Decode(&response)
+	err_decode := decoder.Decode(&data_file)
 	if err_decode != nil {
 		utils.Log(utils.Error, "Error al decodificar el archivo")
 	}
 	utils.Log(utils.Info, "Fin de obtención de json")
-	return response
+	return data_file
 }
 
 func compare_repository(local MyRepository, github_repo MyRepository) {
 	update_repository := false
 	repository_github_updated := &github.Repository{}
 	if *local.Name != *github_repo.Name {
+		utils.Log(utils.Info, "El nombre del repositorio %v ha cambiado", *local.Name)
+		utils.Log(utils.Info, "github: %v", *github_repo.Name)
+		utils.Log(utils.Info, "local: %v", *local.Name)
 		repository_github_updated.Name = local.Name
 		update_repository = true
 	}
